@@ -1,12 +1,12 @@
 [tool.poetry]
 name = "certsync"
-version = "0.1.6"
-description = "Dump NTDS with golden certificates and UnPAC the hash"
+version = "0.2.0"
+description = "Retrieve domain users hash by getting certificates and UnPAC the hash."
 readme = "README.md"
 homepage = "https://github.com/zblurx/certsync"
 repository = "https://github.com/zblurx/certsync"
 keywords = ["ntds", "certificate", "hashes"]
-authors = ["zblurx <seigneuret.thomas@protonmail.com>"]
+authors = ["zblurx <seigneuret.thomas@protonmail.com>", "p-alu <paul.saladin@outlook.com>"]
 license = "MIT"
 classifiers = [
     "Topic :: Security",
